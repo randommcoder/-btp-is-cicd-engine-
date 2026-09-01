@@ -1,0 +1,269 @@
+name: '[ADMIN] Transport and Deploy as Package'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: 'Source branch in GIT containing the package'
+        required: true
+        type: string
+      source-directory:
+        description: 'Source directory in GIT containing the package'
+        required: true
+        type: string
+      target-branch:
+        description: 'Target branch in GIT to transport code to (e.g., PRD)'
+        required: true
+        type: string
+      target-directory:
+        description: 'Target directory in GIT to place the package'
+        required: true
+        type: string
+      target-env:
+        description: 'Target Environment (e.g., QA, PRD)'
+        required: true
+        type: string
+
+      commit-message:
+        description: 'Commit message for the target branch'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      source-branch:
+        description: 'Source branch in GIT containing the package'
+        required: true
+        type: string
+      source-directory:
+        description: 'Source directory in GIT containing the package'
+        required: true
+        type: string
+      target-branch:
+        description: 'Target branch in GIT to transport code to (e.g., PRD)'
+        required: true
+        type: string
+      target-directory:
+        description: 'Target directory in GIT to place the package'
+        required: true
+        type: string
+      target-env:
+        description: 'Target Environment (e.g., QA, PRD)'
+        required: true
+        type: string
+
+      commit-message:
+        description: 'Commit message for the target branch'
+        required: true
+        type: string
+
+
+permissions:
+  contents: write
+
+jobs:
+  transport-and-deploy:
+    name: Transport and Deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target-env }}
+    steps:
+      - name: Checkout Repository for Actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Source Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-branch }}
+          path: source-repo
+
+      - name: Checkout Target Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target-branch }}
+          path: target-repo
+
+      - name: Apply Environment Auto-Config
+        run: |
+          TARGET_ENV_INPUT="${{ inputs.target-env }}"
+          GLOBAL_CONFIG=$(find target-repo -maxdepth 1 -iname "Transport_Parameters.json" | head -n 1)
+          SRC_DIR="source-repo/${{ inputs.source-directory }}"
+          PACKAGE_CONFIG="$SRC_DIR/Configuration/ConfigParams_INTEGRATION_FLOW.json"
+          
+          if [ ! -f "$GLOBAL_CONFIG" ]; then
+            echo "No global config found at Transport_Parameters.json. Skipping auto-config."
+          else
+            echo "Applying global config from $GLOBAL_CONFIG..."
+            python3 -c "
+          import sys, json, os
+          
+          target_env = sys.argv[1]
+          global_cfg_path = sys.argv[2]
+          pkg_cfg_path = sys.argv[3]
+          src_dir = sys.argv[4]
+          
+          with open(global_cfg_path, 'r') as f:
+              global_cfg = json.load(f)
+              
+          # 1. Update ConfigParams_INTEGRATION_FLOW.json (if exists)
+          if os.path.exists(pkg_cfg_path):
+              with open(pkg_cfg_path, 'r') as f:
+                  pkg_cfg = json.load(f)
+                  
+              modified_json = False
+              artifacts = pkg_cfg.get('PackageIntegrationFlowParameters', {}).get('Artifacts', [])
+              for artifact in artifacts:
+                  for param in artifact.get('Parameters', []):
+                      key = param.get('ParameterKey')
+                      if key in global_cfg:
+                          param_vals = param.setdefault('ParameterValues', {})
+                          param_vals['Default'] = str(global_cfg[key])
+                          param_vals[target_env] = str(global_cfg[key])
+                          modified_json = True
+                          
+              if modified_json:
+                  with open(pkg_cfg_path, 'w') as f:
+                      json.dump(pkg_cfg, f, indent=4)
+                  print('✅ Successfully updated ConfigParams_INTEGRATION_FLOW.json')
+          else:
+              print(f'ℹ️ No package config found at {pkg_cfg_path}. Skipping JSON update.')
+              
+          # 2. Update all parameters.prop files in the package
+          prop_files_updated = 0
+          for root, dirs, files in os.walk(src_dir):
+              if 'parameters.prop' in files:
+                  prop_path = os.path.join(root, 'parameters.prop')
+                  with open(prop_path, 'r', encoding='utf-8') as f:
+                      lines = f.readlines()
+                      
+                  new_lines = []
+                  modified_prop = False
+                  for line in lines:
+                      stripped = line.strip()
+                      if stripped and not stripped.startswith('#') and '=' in stripped:
+                          key, _, val = stripped.partition('=')
+                          key = key.strip()
+                          if key in global_cfg:
+                              new_val = str(global_cfg[key])
+                              new_lines.append(f'{key}={new_val}\n')
+                              modified_prop = True
+                              print(f'✅ Overwrote in parameters.prop: {key} = {new_val}')
+                          else:
+                              new_lines.append(line)
+                      else:
+                          new_lines.append(line)
+                          
+                  if modified_prop:
+                      with open(prop_path, 'w', encoding='utf-8') as f:
+                          f.writelines(new_lines)
+                      prop_files_updated += 1
+                      
+          print(f'✅ Updated {prop_files_updated} parameters.prop files.')
+          " "${TARGET_ENV_INPUT}" "${GLOBAL_CONFIG}" "${PACKAGE_CONFIG}" "${SRC_DIR}"
+          fi
+
+      - name: Prepare directory structure for SAP actions
+        run: |
+          # SAP actions expect code to be in btp-insuite/IntegrationPackages/<package-name>
+          mkdir -p btp-insuite/IntegrationPackages
+          
+          # The source directory should contain the package folder (e.g., PackageName~PackageID)
+          # We copy it into the expected IntegrationPackages path
+          cp -r "source-repo/${{ inputs.source-directory }}" btp-insuite/IntegrationPackages/
+          
+          echo "✅ Package prepared for deployment"
+          ls -l btp-insuite/IntegrationPackages/
+
+      - name: Auto-Detect Package ID
+        id: detect-package-id
+        run: |
+          # Find the folder we just copied
+          PACKAGE_FOLDER=$(ls btp-insuite/IntegrationPackages)
+          MANIFEST="btp-insuite/IntegrationPackages/$PACKAGE_FOLDER/META-INF/MANIFEST.MF"
+          
+          if [ -f "$MANIFEST" ]; then
+            # The Package ID is defined in Bundle-SymbolicName
+            PACKAGE_ID=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$MANIFEST" | cut -d':' -f2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\r')
+            
+            if [ -z "$PACKAGE_ID" ]; then
+               # Try alternate
+               PACKAGE_ID=$(grep -iE '^Origin-Bundle-Symbolic-Name:' "$MANIFEST" | cut -d':' -f2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\r')
+            fi
+          fi
+          
+          if [ -z "$PACKAGE_ID" ]; then
+            echo "⚠️ Could not determine Package ID from package-level MANIFEST.MF. Checking child artifacts' metadata..."
+            CHILD_META=$(find "btp-insuite/IntegrationPackages/$PACKAGE_FOLDER" -name "btp-metadata.json" | head -n 1)
+            if [ -n "$CHILD_META" ]; then
+               PACKAGE_ID=$(jq -r '.d.PackageId // .PackageId // empty' "$CHILD_META")
+            fi
+          fi
+          
+          if [ -z "$PACKAGE_ID" ]; then
+            echo "❌ Error: Could not determine Package ID from MANIFEST.MF or child artifacts' metadata."
+            echo "Refusing to guess Package ID from folder name to avoid mismatches or malformed URLs."
+            exit 1
+          fi
+          
+          echo "✅ Detected Package ID: $PACKAGE_ID"
+          echo "package_id=$PACKAGE_ID" >> $GITHUB_OUTPUT
+
+      - name: Upload Package to CPI Designtime
+        uses: ./.github/actions/update-designtime
+        with:
+          target-env: ${{ inputs.target-env }}
+          source-ref: ${{ inputs.source-branch }}
+          package-id: ${{ steps.detect-package-id.outputs.package_id }}
+          case: "Upload"
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+          
+      - name: Deploy Package to CPI Runtime
+        uses: ./.github/actions/update-runtime
+        with:
+          target-env: ${{ inputs.target-env }}
+          source-ref: ${{ inputs.source-branch }}
+          package-id: ${{ steps.detect-package-id.outputs.package_id }}
+          mode: "Deploy"
+          iflow-deploy: "true"
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+          enable-set-log-level: "true"
+
+
+
+      - name: Transport Code to Target Branch
+        run: |
+          cd target-repo
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          
+          # Clean target directory to reflect deletions
+          TARGET_DIR="${{ inputs.target-directory }}"
+          rm -rf "$TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+          
+          # Copy from source repo to target repo exactly
+          cp -a "../source-repo/${{ inputs.source-directory }}/." "$TARGET_DIR/"
+          
+          git add "$TARGET_DIR"
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit to target branch."
+          else
+            git commit -m "${{ inputs.commit-message }}"
+            git push origin HEAD:${{ inputs.target-branch }}
+            echo "✅ Successfully transported code to ${{ inputs.target-branch }}"
+          fi
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          echo "### Transport and Deploy Package Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Directory:** \`${{ inputs.source-directory }}\` (\`${{ inputs.source-branch }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Directory:** \`${{ inputs.target-directory }}\` (\`${{ inputs.target-branch }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Environment:** \`${{ inputs.target-env }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Successfully transported the package to the target branch and deployed to BTP!" >> $GITHUB_STEP_SUMMARY

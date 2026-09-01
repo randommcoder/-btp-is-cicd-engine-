@@ -1,0 +1,43 @@
+name: '[Caller] [ADMIN] Transport and Deploy as Package'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: 'Source branch in GIT containing the package'
+        required: true
+        type: string
+      source-directory:
+        description: 'Source directory in GIT containing the package'
+        required: true
+        type: string
+      target-branch:
+        description: 'Target branch in GIT to transport code to (e.g., PRD)'
+        required: true
+        type: string
+      target-directory:
+        description: 'Target directory in GIT to place the package'
+        required: true
+        type: string
+      target-env:
+        description: 'Target Environment (e.g., QA, PRD)'
+        required: true
+        type: string
+
+      commit-message:
+        description: 'Commit message for the target branch'
+        required: true
+        type: string
+
+
+jobs:
+  call-engine:
+    uses: your-org/btp-is-cicd-engine/.github/workflows/transport-and-deploy.yml@main
+    with:
+      source-branch: ${{ inputs.source-branch }}
+      source-directory: ${{ inputs.source-directory }}
+      target-branch: ${{ inputs.target-branch }}
+      target-directory: ${{ inputs.target-directory }}
+      target-env: ${{ inputs.target-env }}
+      commit-message: ${{ inputs.commit-message }}
+    secrets: inherit

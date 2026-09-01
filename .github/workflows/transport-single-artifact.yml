@@ -1,0 +1,394 @@
+name: '[ADMIN] Transport as Single Artifact'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: 'Source branch in GIT containing the package'
+        required: true
+        type: string
+      target-branch:
+        description: 'Target branch in GIT to transport code to (e.g., PRD)'
+        required: true
+        type: string
+      source-package-name:
+        description: 'Source Package Name (e.g. Example Package)'
+        required: true
+        type: string
+      target-package-name:
+        description: 'Target Package Name (e.g. Example Package)'
+        required: true
+        type: string
+      target-package-id:
+        description: 'Target Package ID (e.g. EXAMPLE_PACKAGE_ID)'
+        required: true
+        type: string
+      artifact-name:
+        description: 'Artifact Name / Folder Name (e.g. EXAMPLE ARTIFACT NAME)'
+        required: true
+        type: string
+      target-env:
+        description: 'Target Environment (e.g., QA, PRD)'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for the target branch'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      source-branch:
+        description: 'Source branch in GIT containing the package'
+        required: true
+        type: string
+      target-branch:
+        description: 'Target branch in GIT to transport code to (e.g., PRD)'
+        required: true
+        type: string
+      source-package-name:
+        description: 'Source Package Name (e.g. Example Package)'
+        required: true
+        type: string
+      target-package-name:
+        description: 'Target Package Name (e.g. Example Package)'
+        required: true
+        type: string
+      target-package-id:
+        description: 'Target Package ID (e.g. EXAMPLE_PACKAGE_ID)'
+        required: true
+        type: string
+      artifact-name:
+        description: 'Artifact Name / Folder Name (e.g. EXAMPLE ARTIFACT NAME)'
+        required: true
+        type: string
+      target-env:
+        description: 'Target Environment (e.g., QA, PRD)'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for the target branch'
+        required: true
+        type: string
+
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-single-artifact:
+    name: Transport Single Artifact
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target-env }}
+    steps:
+      - name: Checkout Repository for Actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Source Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-branch }}
+          path: source-repo
+
+      - name: Checkout Target Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target-branch }}
+          path: target-repo
+
+      - name: Apply Environment Auto-Config
+        run: |
+          TARGET_ENV_INPUT="${{ inputs.target-env }}"
+          GLOBAL_CONFIG=$(find target-repo -maxdepth 1 -iname "Transport_Parameters.json" | head -n 1)
+          SRC_DIR="source-repo/IntegrationPackage/${{ inputs.source-package-name }}"
+          
+          if [ ! -f "$GLOBAL_CONFIG" ]; then
+            echo "No global config found at Transport_Parameters.json. Skipping auto-config."
+          else
+            echo "Applying global config from $GLOBAL_CONFIG..."
+            python3 -c "
+          import sys, json, os
+          
+          global_cfg_path = sys.argv[1]
+          src_dir = sys.argv[2]
+          
+          with open(global_cfg_path, 'r') as f:
+              global_cfg = json.load(f)
+              
+          prop_files_updated = 0
+          for root, dirs, files in os.walk(src_dir):
+              if 'parameters.prop' in files:
+                  prop_path = os.path.join(root, 'parameters.prop')
+                  with open(prop_path, 'r', encoding='utf-8') as f:
+                      lines = f.readlines()
+                      
+                  new_lines = []
+                  modified_prop = False
+                  for line in lines:
+                      stripped = line.strip()
+                      if stripped and not stripped.startswith('#') and '=' in stripped:
+                          key, _, val = stripped.partition('=')
+                          key = key.strip()
+                          if key in global_cfg:
+                              new_val = str(global_cfg[key])
+                              new_lines.append(f'{key}={new_val}\n')
+                              modified_prop = True
+                              print(f'✅ Overwrote in parameters.prop: {key} = {new_val}')
+                          else:
+                              new_lines.append(line)
+                      else:
+                          new_lines.append(line)
+                          
+                  if modified_prop:
+                      with open(prop_path, 'w', encoding='utf-8') as f:
+                          f.writelines(new_lines)
+                      prop_files_updated += 1
+                      
+          print(f'✅ Updated {prop_files_updated} parameters.prop files.')
+          " "${GLOBAL_CONFIG}" "${SRC_DIR}"
+          fi
+
+      - name: Request OAuth Token
+        id: get-token
+        uses: ./.github/actions/get-token
+        with:
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-tec-user: ${{ vars.BTP_TEC_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+          BTP_TEC_PASSWORD: ${{ secrets.BTP_TEC_PASSWORD }}
+
+      - name: Upload Artifact to BTP Designtime
+        id: upload-artifact
+        shell: bash
+        env:
+          BEARER_TOKEN: ${{ steps.get-token.outputs.token }}
+          BTP_API_URL: ${{ vars.BTP_API_URL }}
+          SOURCE_PACKAGE: ${{ inputs.source-package-name }}
+          TARGET_PACKAGE: ${{ inputs.target-package-name }}
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        run: |
+          cd "source-repo/IntegrationPackage/$SOURCE_PACKAGE" || exit 1
+          
+          echo "Searching for artifact matching Name or ID: $ARTIFACT_NAME"
+          FOUND_DIR=""
+          for dir in *; do
+            if [ -d "$dir" ] && [ -f "$dir/META-INF/MANIFEST.MF" ]; then
+              b_name=$(awk '/^Bundle-Name:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$dir/META-INF/MANIFEST.MF" | cut -d':' -f2 | tr -d '\r\n' | sed -e 's/^[[:space:]]*//')
+              b_id=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$dir/META-INF/MANIFEST.MF" | cut -d':' -f2 | cut -d';' -f1 | tr -d ' \r\n')
+              
+              if [ "$b_name" = "$ARTIFACT_NAME" ] || [ "$b_id" = "$ARTIFACT_NAME" ]; then
+                FOUND_DIR="$dir"
+                echo "✅ Found match in folder: $dir (ID: $b_id, Name: $b_name)"
+                break
+              fi
+            fi
+          done
+          
+          if [ -z "$FOUND_DIR" ]; then
+            echo "❌ Error: Could not find any artifact matching Name or ID '$ARTIFACT_NAME' in $SOURCE_PACKAGE"
+            exit 1
+          fi
+          
+          echo "artifact_folder=$FOUND_DIR" >> $GITHUB_OUTPUT
+          
+          echo "Packaging artifact $ARTIFACT_NAME..."
+          cd "$FOUND_DIR"
+          zip -q -r ../artifact.zip . -x "btp-metadata.json"
+          cd ..
+          
+          ZIPLOCATION="artifact.zip"
+          
+          echo "Extracting artifact ID from MANIFEST.MF..."
+          unzip -p "$ZIPLOCATION" "META-INF/MANIFEST.MF" > artifact_manifest.mf
+          ARTIFACT_ID=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' artifact_manifest.mf | cut -d':' -f2 | cut -d';' -f1 | tr -d ' \r\n')
+          EXTRACTED_NAME=$(awk '/^Bundle-Name:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' artifact_manifest.mf | cut -d':' -f2 | tr -d '\r\n' | sed -e 's/^[[:space:]]*//')
+          if [ -z "$EXTRACTED_NAME" ]; then EXTRACTED_NAME="$ARTIFACT_ID"; fi
+          
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "❌ Error: Could not determine ARTIFACT_ID from MANIFEST.MF"
+            exit 1
+          fi
+          
+          echo "Detecting artifact type..."
+          BUNDLE_TYPE=$(unzip -p "$ZIPLOCATION" "META-INF/MANIFEST.MF" | awk -F': ' '/^SAP-BundleType:/ {print $2}' | tr -d '\r\n')
+          if [ "$BUNDLE_TYPE" = "ScriptCollection" ] || grep -q "scriptcollection" artifact_manifest.mf 2>/dev/null; then
+             ENDPOINT="ScriptCollectionDesigntimeArtifacts"
+             DEPLOY_ENDPOINT=""
+          elif [ "$BUNDLE_TYPE" = "ValueMapping" ] || grep -q "value_mapping" artifact_manifest.mf 2>/dev/null; then
+             ENDPOINT="ValueMappingDesigntimeArtifacts"
+             DEPLOY_ENDPOINT="DeployValueMappingDesigntimeArtifact"
+          elif [ "$BUNDLE_TYPE" = "MessageMapping" ] || grep -q "MessageMapping" artifact_manifest.mf 2>/dev/null; then
+             ENDPOINT="MessageMappingDesigntimeArtifacts"
+             DEPLOY_ENDPOINT=""
+          else
+             ENDPOINT="IntegrationDesigntimeArtifacts"
+             DEPLOY_ENDPOINT="DeployIntegrationDesigntimeArtifact"
+          fi
+          
+          EXTRACTED_DESC=""
+          HAS_METADATA=false
+          if [ -f "$FOUND_DIR/btp-metadata.json" ]; then
+             echo "Found btp-metadata.json. Extracting metadata..."
+             META_NAME=$(jq -r '.d.Name // .Name // empty' "$FOUND_DIR/btp-metadata.json")
+             META_DESC=$(jq -r '.d.Description // .Description // empty' "$FOUND_DIR/btp-metadata.json")
+             if [ -n "$META_NAME" ]; then EXTRACTED_NAME="$META_NAME"; fi
+             if [ -n "$META_DESC" ]; then EXTRACTED_DESC="$META_DESC"; fi
+             HAS_METADATA=true
+          fi
+          
+          echo "Artifact ID: $ARTIFACT_ID"
+          echo "Artifact Endpoint: $ENDPOINT"
+          
+          TARGET_PACKAGE_ID="${{ inputs.target-package-id }}"
+          
+          echo "Checking if Target Package $TARGET_PACKAGE_ID exists..."
+          pkg_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/IntegrationPackages('$TARGET_PACKAGE_ID')" \
+            -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+          PKG_STATUS=$(echo "$pkg_resp" | tail -n1)
+          
+          if [ "$PKG_STATUS" = "404" ]; then
+            echo "⚠️ Target Package does not exist. Creating via POST..."
+            jq -n --arg id "$TARGET_PACKAGE_ID" --arg name "$TARGET_PACKAGE" --arg desc "$TARGET_PACKAGE" \
+              '{Id: $id, Name: $name, Description: $desc, ShortText: $desc}' > pkg_payload.json
+            pkg_create_resp=$(curl -s -w "\n%{http_code}" -X POST "$BTP_API_URL/api/v1/IntegrationPackages" \
+              -H "Authorization: $BEARER_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json" \
+              --data-binary "@pkg_payload.json")
+            PKG_CREATE_STATUS=$(echo "$pkg_create_resp" | tail -n1)
+            if [ "$PKG_CREATE_STATUS" != "201" ] && [ "$PKG_CREATE_STATUS" != "200" ]; then
+               echo "❌ Error creating package: $PKG_CREATE_STATUS"
+               exit 1
+            fi
+            echo "✅ Target Package created."
+          elif [ "$PKG_STATUS" != "200" ]; then
+            echo "❌ Error checking package: $PKG_STATUS"
+            exit 1
+          fi
+          
+          echo "Checking if $ARTIFACT_ID exists in target package..."
+          check_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')" \
+            -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+          CHK_STATUS=$(echo "$check_resp" | tail -n1)
+          
+          base64 -w 0 "$ZIPLOCATION" > artifact_encoded.txt
+          
+          if [ "$CHK_STATUS" = "200" ]; then
+             echo "♻️ Artifact exists. Updating existing artifact (PUT) to preserve version history..."
+             
+             # For PUT (update), SAP CPI MessageMapping API explicitly rejects payloads containing Id and PackageId
+             if [ "$HAS_METADATA" = true ]; then
+                jq -Rs --arg name "$EXTRACTED_NAME" --arg desc "$EXTRACTED_DESC" \
+                  '{Name: $name, Description: $desc, ArtifactContent: .}' artifact_encoded.txt > payload.json
+             else
+                jq -Rs --arg name "$EXTRACTED_NAME" \
+                  '{Name: $name, ArtifactContent: .}' artifact_encoded.txt > payload.json
+             fi
+             
+             up_resp=$(curl -s -w "\n%{http_code}" -X PUT "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')" \
+               -H "Authorization: $BEARER_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json" \
+               --data-binary "@payload.json")
+               
+             # Save version history
+             echo "Saving version in history..."
+             save_resp=$(curl -s -w "\n%{http_code}" -X POST "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')/SaveVersion" \
+               -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json" -H "Content-Length: 0")
+             SAVE_STATUS=$(echo "$save_resp" | tail -n1)
+             if [ "$SAVE_STATUS" != "200" ] && [ "$SAVE_STATUS" != "201" ] && [ "$SAVE_STATUS" != "202" ] && [ "$SAVE_STATUS" != "204" ]; then
+                 echo "⚠️ Failed to explicitly save version history, but upload succeeded. Status: $SAVE_STATUS"
+             else
+                 echo "✅ Version history successfully saved."
+             fi
+          else
+             echo "➕ Artifact does not exist. Creating new artifact (POST)..."
+             
+             # For POST (create), we MUST provide Id and PackageId
+             if [ "$HAS_METADATA" = true ]; then
+                jq -Rs --arg id "$ARTIFACT_ID" --arg name "$EXTRACTED_NAME" --arg desc "$EXTRACTED_DESC" --arg pkg "$TARGET_PACKAGE_ID" \
+                  '{Id: $id, Name: $name, Description: $desc, PackageId: $pkg, ArtifactContent: .}' artifact_encoded.txt > payload.json
+             else
+                jq -Rs --arg id "$ARTIFACT_ID" --arg name "$EXTRACTED_NAME" --arg pkg "$TARGET_PACKAGE_ID" \
+                  '{Id: $id, Name: $name, PackageId: $pkg, ArtifactContent: .}' artifact_encoded.txt > payload.json
+             fi
+             
+             up_resp=$(curl -s -w "\n%{http_code}" -X POST "$BTP_API_URL/api/v1/$ENDPOINT" \
+               -H "Authorization: $BEARER_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json" \
+               --data-binary "@payload.json")
+          fi
+          
+          UP_STATUS=$(echo "$up_resp" | tail -n1)
+          
+          if [ "$UP_STATUS" != "201" ] && [ "$UP_STATUS" != "200" ] && [ "$UP_STATUS" != "202" ] && [ "$UP_STATUS" != "204" ]; then
+             echo "❌ Error uploading artifact: $UP_STATUS"
+             echo "$up_resp"
+             exit 1
+          fi
+          echo "✅ Successfully uploaded artifact $ARTIFACT_ID to Designtime."
+          
+          echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+          echo "deploy_endpoint=$DEPLOY_ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Artifact to Runtime
+        shell: bash
+        env:
+          BEARER_TOKEN: ${{ steps.get-token.outputs.token }}
+          BTP_API_URL: ${{ vars.BTP_API_URL }}
+          ARTIFACT_ID: ${{ steps.upload-artifact.outputs.artifact_id }}
+          DEPLOY_ENDPOINT: ${{ steps.upload-artifact.outputs.deploy_endpoint }}
+        run: |
+          if [ -z "$DEPLOY_ENDPOINT" ]; then
+             echo "ℹ️ This artifact type does not require runtime deployment. Skipping."
+             exit 0
+          fi
+          
+          echo "Deploying artifact $ARTIFACT_ID to Runtime..."
+          deploy_resp=$(curl -s -w "\n%{http_code}" -X POST "$BTP_API_URL/api/v1/$DEPLOY_ENDPOINT?Id='$ARTIFACT_ID'&Version='active'" \
+            -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+          DEPLOY_STATUS=$(echo "$deploy_resp" | tail -n1)
+          
+          if [ "$DEPLOY_STATUS" != "200" ] && [ "$DEPLOY_STATUS" != "202" ]; then
+             echo "❌ Error deploying artifact to Runtime: $DEPLOY_STATUS"
+             echo "$deploy_resp"
+             exit 1
+          fi
+          echo "✅ Successfully triggered Runtime Deployment for $ARTIFACT_ID."
+
+      - name: Transport Code to Target Branch
+        run: |
+          cd target-repo
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          
+          ARTIFACT_FOLDER="${{ steps.upload-artifact.outputs.artifact_folder }}"
+          if [ -z "$ARTIFACT_FOLDER" ]; then
+             echo "❌ Error: Could not determine artifact folder from previous step."
+             exit 1
+          fi
+          
+          TARGET_DIR="IntegrationPackage/${{ inputs.target-package-name }}/$ARTIFACT_FOLDER"
+          mkdir -p "$TARGET_DIR"
+          
+          # Remove old contents if they exist
+          rm -rf "$TARGET_DIR"/*
+          
+          # Copy from source repo
+          cp -r "../source-repo/IntegrationPackage/${{ inputs.source-package-name }}/$ARTIFACT_FOLDER"/* "$TARGET_DIR"/
+          
+          git add "$TARGET_DIR"
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit to target branch for this artifact."
+          else
+            git commit -m "${{ inputs.commit-message }}"
+            git push origin HEAD:${{ inputs.target-branch }}
+            echo "✅ Successfully transported artifact to ${{ inputs.target-branch }}"
+          fi
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          echo "### Transport Single Artifact Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifact Name/ID:** \`${{ inputs.artifact-name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Package:** \`${{ inputs.source-package-name }}\` (\`${{ inputs.source-branch }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Package:** \`${{ inputs.target-package-name }}\` (\`${{ inputs.target-branch }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Environment:** \`${{ inputs.target-env }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Successfully transported the artifact to the target branch and deployed to BTP!" >> $GITHUB_STEP_SUMMARY

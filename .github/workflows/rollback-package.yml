@@ -1,0 +1,199 @@
+name: '[EMERGENCY] Rollback Package in GIT'
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'The branch to perform the rollback on (e.g., DEV)'
+        required: true
+        type: string
+      package-directory:
+        description: 'The folder of the package to rollback (e.g., IntegrationPackages/SAP_Package)'
+        required: true
+        type: string
+      versions-to-rollback:
+        description: 'How many versions back to go (1 = undo last update)'
+        required: false
+        default: '1'
+        type: string
+      commit-message:
+        description: 'Commit message for the rollback'
+        required: false
+        default: 'Automated rollback of package'
+        type: string
+      target-env:
+        description: 'Optional: Target BTP Environment to push the rollback to (e.g., DEV, QA). Leave empty to only rollback in Git.'
+        required: false
+        type: string
+
+  workflow_call:
+    inputs:
+      branch:
+        description: 'The branch to perform the rollback on (e.g., DEV)'
+        required: true
+        type: string
+      package-directory:
+        description: 'The folder of the package to rollback (e.g., IntegrationPackages/SAP_Package)'
+        required: true
+        type: string
+      versions-to-rollback:
+        description: 'How many versions back to go (1 = undo last update)'
+        required: false
+        default: '1'
+        type: string
+      commit-message:
+        description: 'Commit message for the rollback'
+        required: false
+        default: 'Automated rollback of package'
+        type: string
+      target-env:
+        description: 'Optional: Target BTP Environment to push the rollback to (e.g., DEV, QA). Leave empty to only rollback in Git.'
+        required: false
+        type: string
+
+
+permissions:
+  contents: write
+
+jobs:
+  rollback:
+    name: Rollback Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository with full history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0  # We need full history to find older commits
+
+      - name: Calculate Previous Version Hash
+        id: calc-hash
+        run: |
+          PACKAGE_DIR="${{ inputs.package-directory }}"
+          VERSIONS_BACK=${{ inputs.versions-to-rollback }}
+          
+          # Check if the folder exists in the current history
+          if [ ! -d "$PACKAGE_DIR" ]; then
+            echo "⚠️ Warning: $PACKAGE_DIR does not currently exist in the working directory."
+            echo "We will search the git history to see if it existed previously."
+          fi
+          
+          # Find the commit hash that touched this folder N versions ago
+          # -n 1 means get 1 commit
+          # --skip N skips the last N commits that touched the folder
+          # This effectively gets the state of the folder from exactly N updates ago
+          
+          HASH=$(git log --skip="$VERSIONS_BACK" -n 1 --pretty=format:%H -- "$PACKAGE_DIR")
+          
+          if [ -z "$HASH" ]; then
+            echo "❌ Error: Could not find an older version of $PACKAGE_DIR going back $VERSIONS_BACK updates."
+            exit 1
+          fi
+          
+          echo "✅ Found historical commit hash for rollback: $HASH"
+          echo "commit_hash=$HASH" >> $GITHUB_OUTPUT
+
+      - name: Rollback Package Folder
+        run: |
+          PACKAGE_DIR="${{ inputs.package-directory }}"
+          HASH="${{ steps.calc-hash.outputs.commit_hash }}"
+          
+          echo "Checking out $PACKAGE_DIR from commit $HASH..."
+          git checkout "$HASH" -- "$PACKAGE_DIR"
+          
+          echo "✅ Successfully rolled back $PACKAGE_DIR in the local workspace."
+
+      - name: Commit and Push Rollback
+        run: |
+         git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          
+          PACKAGE_DIR="${{ inputs.package-directory }}"
+          git add "$PACKAGE_DIR"
+          
+          if git diff --staged --quiet; then
+            echo "⚠️ The previous version of $PACKAGE_DIR is identical to the current version. Nothing to rollback."
+          else
+            git commit -m "${{ inputs.commit-message }}"
+            git push origin HEAD:${{ inputs.branch }}
+            echo "✅ Successfully pushed rolled back package to ${{ inputs.branch }}!"
+          fi
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          echo "### Rollback Package Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Package Directory:** \`${{ inputs.package-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Versions Rolled Back:** \`${{ inputs.versions-to-rollback }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ inputs.target-env }}" ]; then
+            echo "**Deployed to BTP Environment:** \`${{ inputs.target-env }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "> Successfully reverted the package folder to a previous Git commit!" >> $GITHUB_STEP_SUMMARY
+
+  deploy-rollback:
+    name: Deploy Rollback to BTP
+    needs: rollback
+    if: ${{ inputs.target-env != '' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target-env }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Prepare directory structure for SAP actions
+        run: |
+          mkdir -p btp-insuite/IntegrationPackages
+          cp -r "${{ inputs.package-directory }}" btp-insuite/IntegrationPackages/
+          echo "✅ Package prepared for deployment"
+
+      - name: Auto-Detect Package ID
+        id: detect-package-id
+        run: |
+          PACKAGE_FOLDER=$(ls btp-insuite/IntegrationPackages)
+          MANIFEST="btp-insuite/IntegrationPackages/$PACKAGE_FOLDER/META-INF/MANIFEST.MF"
+          
+          if [ -f "$MANIFEST" ]; then
+            PACKAGE_ID=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$MANIFEST" | cut -d':' -f2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\r')
+            if [ -z "$PACKAGE_ID" ]; then
+               PACKAGE_ID=$(grep -iE '^Origin-Bundle-Symbolic-Name:' "$MANIFEST" | cut -d':' -f2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\r')
+            fi
+          fi
+          
+          if [ -z "$PACKAGE_ID" ]; then
+            PACKAGE_ID="$PACKAGE_FOLDER"
+            if [[ "$PACKAGE_ID" == *~* ]]; then
+              PACKAGE_ID="${PACKAGE_ID##*~}"
+            fi
+          fi
+          
+          echo "✅ Detected Package ID: $PACKAGE_ID"
+          echo "package_id=$PACKAGE_ID" >> $GITHUB_OUTPUT
+
+      - name: Upload Package to CPI Designtime
+        uses: ./.github/actions/update-designtime
+        with:
+          target-env: ${{ inputs.target-env }}
+          source-ref: ${{ inputs.branch }}
+          package-id: ${{ steps.detect-package-id.outputs.package_id }}
+          case: "Upload"
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+          
+      - name: Deploy Package to CPI Runtime
+        uses: ./.github/actions/update-runtime
+        with:
+          target-env: ${{ inputs.target-env }}
+          source-ref: ${{ inputs.branch }}
+          package-id: ${{ steps.detect-package-id.outputs.package_id }}
+          mode: "Deploy"
+          iflow-deploy: "true"
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+          enable-set-log-level: "true"

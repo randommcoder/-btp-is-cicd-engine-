@@ -1,0 +1,37 @@
+name: '[Caller] [DEV] Import CPI Package to GIT'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-env:
+        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
+        required: true
+        type: string
+      git-branch:
+        description: 'Target branch in GIT to import into'
+        required: true
+        type: string
+      git-directory:
+        description: 'Target directory in GIT for the package'
+        required: true
+        type: string
+      package-id:
+        description: 'Package ID to download from BTP'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for GIT'
+        required: true
+        type: string
+
+
+jobs:
+  call-engine:
+    uses: your-org/btp-is-cicd-engine/.github/workflows/import-to-git.yml@main
+    with:
+      source-env: ${{ inputs.source-env }}
+      git-branch: ${{ inputs.git-branch }}
+      git-directory: ${{ inputs.git-directory }}
+      package-id: ${{ inputs.package-id }}
+      commit-message: ${{ inputs.commit-message }}
+    secrets: inherit

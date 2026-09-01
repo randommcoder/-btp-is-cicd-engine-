@@ -1,0 +1,127 @@
+# Copyright (c) 2025 Mercedes-Benz AG
+# Oliver Weng <sap.weng@extaccount.com>
+#
+# Version History:
+# 1.0.0 - 2025-11-24 - Initial release (O. Weng)
+# 1.0.1 - 2026-01-28 - Changed to actions/upload-artifact@v3 to support also older GHES installations (O. Weng)
+# 1.0.2 - 2026-02-26 - Use v4 for github.com/ghe.com, v3 for GHES (O. Weng)
+#
+name: Prepare ZIP Package from GIT
+description: Prepare ZIP Package from GIT
+
+inputs:
+  package-id:
+    description: "Package ID"
+    required: true
+
+  attach-zip:
+    description: "Attach Package(s) ZIP to Run? (true/false)"
+    required: false
+    default: "false"
+
+outputs:
+  location:
+    description: 'File Path to Package'
+    value: ${{ steps.prepare-zip.outputs.location }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: prepare-zip
+      working-directory: btp-insuite/IntegrationPackages
+      shell: bash
+      env:
+        PACKAGEID: ${{ inputs.package-id }}
+        
+      run: |
+        echo "Looking for package directory in root..."
+
+        # Find all top-level directories
+        mapfile -t matches < <(find . -mindepth 1 -maxdepth 1 -type d)
+
+        # Validate number of matches
+        if [[ ${#matches[@]} -gt 1 ]]; then
+          echo "❌ Error: Multiple directories found. Expected only one package directory:"
+          for match in "${matches[@]}"; do
+            echo " - $match"
+          done
+          exit 1
+        elif [[ ${#matches[@]} -eq 0 ]]; then
+          echo "❌ No directory found. Package not found in Repo."
+          exit 1
+        fi
+
+        # Proceed with processing the single matching directory
+        dir="${matches[0]}"
+        dir_name=$(basename "$dir")
+        echo "✅ Found only one matching directory: $dir_name"
+        echo "package_dir_name=$dir_name" >> "$GITHUB_OUTPUT"
+        TARGET_DIR="${{ runner.temp }}/$dir_name"
+        echo "Create temp directory $TARGET_DIR"
+        mkdir -p "$TARGET_DIR"
+
+        # Show hidden file (in case there are any
+        shopt -s dotglob
+
+        # Copy files and zip directories to "$TARGET_DIR"
+        for item in "$dir_name"/*; do
+          name=$(basename "$item")
+          if [ -d "$item" ]; then
+            if [ "$name" == "Configuration" ] || [ "$name" == "Architecture" ] || [ "$name" == "Docs" ] || [ "$name" == "Documentation" ] || [ "$name" == "Tests" ]; then
+              echo "⏭️ Skipping non-runtime directory: $name"
+              continue
+            fi
+            echo "📦 Found Directory $name"    
+            (
+              cd "$item" || exit 1
+              tmp_zip="$TARGET_DIR/${name}.zip"
+              echo "Zipping contents of directory '$item' into temp file '$tmp_zip'"
+              zip -r "$tmp_zip" . -x "btp-metadata.json"
+              # Rename by removing the .zip extension
+              mv "$tmp_zip" "$TARGET_DIR/$name"
+              echo "Renamed $tmp_zip to $TARGET_DIR/$name (no .zip extension)"
+            )
+          elif [ -f "$item" ]; then
+            echo "📋 Copy File $name"
+            cp "$item" "$TARGET_DIR/"
+          fi
+        done
+
+        if [[ "${{ inputs.attach-zip }}" == "true" ]]; then
+          echo "📦 attach-zip=true → skipping final ZIP creation"
+          echo "location=$TARGET_DIR" >> "$GITHUB_OUTPUT"
+        else
+          echo "📦 attach-zip=false → creating final ZIP"
+          cd "$TARGET_DIR"
+          FINAL_ZIP="${{ runner.temp }}/$dir_name.zip"
+          zip "$FINAL_ZIP" ./*
+          echo "location=$FINAL_ZIP" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Detect GitHub Server Type
+      if: ${{ inputs.attach-zip == 'true' }}
+      shell: bash
+      run: |
+        echo "🔍 Detecting GitHub server type..."
+        echo "   Server URL: ${{ github.server_url }}"
+        if [[ "${{ github.server_url }}" == *"github.com"* ]] || [[ "${{ github.server_url }}" == *"ghe.com"* ]]; then
+          echo "✅ Detected: GitHub Cloud (github.com or ghe.com)"
+          echo "   → Using upload-artifact@v4"
+        else
+          echo "✅ Detected: GitHub Enterprise Server"
+          echo "   → Using upload-artifact@v3"
+        fi
+
+    - name: Upload ZIP artifact (v4 - GitHub Cloud)
+      if: ${{ inputs.attach-zip == 'true' && (contains(github.server_url, 'github.com') || contains(github.server_url, 'ghe.com')) }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.prepare-zip.outputs.package_dir_name }}
+        path: ${{ steps.prepare-zip.outputs.location }}
+
+    - name: Upload ZIP artifact (v3 - GitHub Enterprise Server)
+      if: ${{ inputs.attach-zip == 'true' && !contains(github.server_url, 'github.com') && !contains(github.server_url, 'ghe.com') }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.prepare-zip.outputs.package_dir_name }}
+        path: ${{ steps.prepare-zip.outputs.location }}

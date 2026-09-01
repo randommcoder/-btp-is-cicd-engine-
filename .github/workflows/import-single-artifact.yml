@@ -1,0 +1,256 @@
+name: '[DEV] Import Single Artifact to GIT'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-env:
+        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
+        required: true
+        type: string
+      git-branch:
+        description: 'Target branch in GIT to import into'
+        required: true
+        type: string
+      git-directory:
+        description: 'Target directory in GIT for the package (e.g., IntegrationPackage)'
+        required: true
+        type: string
+      package-id:
+        description: 'Package ID to download from BTP (e.g., Example Package)'
+        required: true
+        type: string
+      artifact-id:
+        description: 'Artifact ID to download (e.g., EXAMPLE_ARTIFACT_ID)'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for GIT'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      source-env:
+        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
+        required: true
+        type: string
+      git-branch:
+        description: 'Target branch in GIT to import into'
+        required: true
+        type: string
+      git-directory:
+        description: 'Target directory in GIT for the package (e.g., IntegrationPackage)'
+        required: true
+        type: string
+      package-id:
+        description: 'Package ID to download from BTP (e.g., Example Package)'
+        required: true
+        type: string
+      artifact-id:
+        description: 'Artifact ID to download (e.g., EXAMPLE_ARTIFACT_ID)'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for GIT'
+        required: true
+        type: string
+
+
+permissions:
+  contents: write
+
+jobs:
+  import-single-artifact:
+    name: Download artifact and commit
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.source-env }}
+    steps:
+      - name: Checkout repository at target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git-branch }}
+
+      - name: Request OAuth Token for BTP API
+        id: get-token
+        uses: ./.github/actions/get-token
+        with:
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+
+      - name: Download Single Artifact from BTP
+        shell: bash
+        env:
+          BEARER_TOKEN: ${{ steps.get-token.outputs.token }}
+          BTP_API_URL: ${{ vars.BTP_API_URL }}
+          GIT_DIR: ${{ inputs.git-directory }}
+          PACKAGE_ID: ${{ inputs.package-id }}
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+        run: |
+          TARGET_BASE_DIR="$GIT_DIR"
+          
+          if [ ! -d "$TARGET_BASE_DIR" ]; then
+            echo "❌ Error: Target package directory $TARGET_BASE_DIR does not exist in GIT."
+            echo "Please run the full 'Import CPI Package to GIT' workflow first for new packages."
+            exit 1
+          fi
+          
+          cd "$TARGET_BASE_DIR"
+          
+          echo "Searching for existing artifact folder in GIT matching ID: $ARTIFACT_ID"
+          FOUND_DIR=""
+          for dir in *; do
+            if [ -d "$dir" ] && [ -f "$dir/META-INF/MANIFEST.MF" ]; then
+              b_id=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$dir/META-INF/MANIFEST.MF" | cut -d':' -f2 | cut -d';' -f1 | tr -d ' \r\n')
+              if [ "$b_id" = "$ARTIFACT_ID" ]; then
+                FOUND_DIR="$dir"
+                echo "✅ Found match in folder: $dir"
+                break
+              fi
+            fi
+          done
+          
+          if [ -z "$FOUND_DIR" ]; then
+            echo "⚠️ Artifact folder not found in GIT. Assuming this is a completely NEW artifact."
+            FOUND_DIR="$ARTIFACT_ID"
+            mkdir -p "$FOUND_DIR"
+            
+            # Since we don't have a MANIFEST to determine the endpoint, try them sequentially
+            ENDPOINTS=("IntegrationDesigntimeArtifacts" "MessageMappingDesigntimeArtifacts" "ValueMappingDesigntimeArtifacts" "ScriptCollectionDesigntimeArtifacts")
+            
+            SUCCESS=false
+            for ep in "${ENDPOINTS[@]}"; do
+               echo "Attempting to fetch metadata from endpoint: $ep..."
+               meta_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ep(Id='$ARTIFACT_ID',Version='active')" \
+                 -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+               HTTP_STATUS=$(echo "$meta_resp" | tail -n1)
+               
+               if [ "$HTTP_STATUS" == "200" ]; then
+                 echo "✅ Successfully found artifact metadata at $ep"
+                 # Save metadata body (excluding http code)
+                 echo "$meta_resp" | head -n -1 > btp-metadata.json
+                 ENDPOINT="$ep"
+                 SUCCESS=true
+                 break
+               fi
+            done
+            
+            if [ "$SUCCESS" = false ]; then
+               echo "❌ Error: Could not find artifact '$ARTIFACT_ID' at any known endpoint. (Last HTTP Status: $HTTP_STATUS)"
+               exit 1
+            fi
+            
+            echo "Downloading $ARTIFACT_ID from BTP ($ENDPOINT)..."
+            dl_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')/\$value" \
+              -H "Authorization: $BEARER_TOKEN" --output artifact.zip)
+            HTTP_STATUS=$(echo "$dl_resp" | tail -n1)
+            
+            if [ "$HTTP_STATUS" != "200" ]; then
+               echo "❌ Error downloading artifact from BTP. HTTP Status: $HTTP_STATUS"
+               cat artifact.zip
+               exit 1
+            fi
+            echo "✅ Successfully downloaded artifact.zip"
+            
+          else
+            echo "Determining artifact type from MANIFEST.MF..."
+            BUNDLE_TYPE=$(grep "^SAP-BundleType:" "$FOUND_DIR/META-INF/MANIFEST.MF" 2>/dev/null | cut -d':' -f2 | tr -d ' \r\n')
+            
+            if [ "$BUNDLE_TYPE" = "MessageMapping" ] || grep -q "MessageMapping" "$FOUND_DIR/META-INF/MANIFEST.MF" 2>/dev/null; then
+               ENDPOINT="MessageMappingDesigntimeArtifacts"
+            elif [ "$BUNDLE_TYPE" = "ScriptCollection" ] || grep -q "scriptcollection" "$FOUND_DIR/META-INF/MANIFEST.MF" 2>/dev/null || [ -d "$FOUND_DIR/src/main/resources/scriptcollection" ]; then
+               ENDPOINT="ScriptCollectionDesigntimeArtifacts"
+            elif [ "$BUNDLE_TYPE" = "ValueMapping" ] || grep -q "value_mapping" "$FOUND_DIR/META-INF/MANIFEST.MF" 2>/dev/null || [ -d "$FOUND_DIR/src/main/resources/value_mapping" ]; then
+               ENDPOINT="ValueMappingDesigntimeArtifacts"
+            else
+               ENDPOINT="IntegrationDesigntimeArtifacts"
+            fi
+            
+            echo "Endpoint for download: $ENDPOINT"
+            
+            echo "Fetching metadata for $ARTIFACT_ID from BTP ($ENDPOINT)..."
+            meta_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')" \
+              -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+            META_HTTP_STATUS=$(echo "$meta_resp" | tail -n1)
+            if [ "$META_HTTP_STATUS" == "200" ]; then
+               echo "$meta_resp" | head -n -1 > btp-metadata.json
+               echo "✅ Successfully fetched metadata."
+            else
+               echo "⚠️ Could not fetch metadata for $ARTIFACT_ID. HTTP Status: $META_HTTP_STATUS"
+            fi
+            
+            echo "Downloading $ARTIFACT_ID from BTP ($ENDPOINT)..."
+            
+            dl_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')/\$value" \
+              -H "Authorization: $BEARER_TOKEN" --output artifact.zip)
+              
+            HTTP_STATUS=$(echo "$dl_resp" | tail -n1)
+            
+            if [ "$HTTP_STATUS" != "200" ]; then
+               echo "❌ Error downloading artifact from BTP. HTTP Status: $HTTP_STATUS"
+               cat artifact.zip # Will contain error JSON if it failed
+               exit 1
+            fi
+            
+            echo "✅ Successfully downloaded artifact.zip"
+          fi
+          
+          echo "Cleaning out old folder contents in $FOUND_DIR..."
+          rm -rf "$FOUND_DIR"/*
+          
+          echo "Extracting new artifact into $FOUND_DIR..."
+          unzip -q -o artifact.zip -d "$FOUND_DIR"
+          
+          if [ -f btp-metadata.json ]; then
+             mv btp-metadata.json "$FOUND_DIR/btp-metadata.json"
+          fi
+          
+          # Clean up zip
+          rm artifact.zip
+          
+          echo "Renaming folder to Artifact Name for readability..."
+          BUNDLE_NAME=$(grep -iE '^Bundle-Name:' "$FOUND_DIR/META-INF/MANIFEST.MF" | cut -d':' -f2 | tr -d '\r\n' | sed -e 's/^[[:space:]]*//')
+          if [ -z "$BUNDLE_NAME" ] && [ -f "$FOUND_DIR/btp-metadata.json" ]; then
+             BUNDLE_NAME=$(jq -r '.d.Name // .Name // empty' "$FOUND_DIR/btp-metadata.json")
+          fi
+          
+          if [ -n "$BUNDLE_NAME" ]; then
+             SAFE_NAME=$(echo "$BUNDLE_NAME" | tr -d '/\\:*?"<>|')
+             if [ "$SAFE_NAME" != "$FOUND_DIR" ]; then
+                if [ ! -d "$SAFE_NAME" ]; then
+                   echo "Moving $FOUND_DIR -> $SAFE_NAME"
+                   mv "$FOUND_DIR" "$SAFE_NAME"
+                else
+                   echo "Folder $SAFE_NAME already exists, skipping rename."
+                fi
+             fi
+          fi
+          
+          echo "✅ Artifact successfully updated in GIT structure."
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          
+          TARGET_BASE_DIR="${{ inputs.git-directory }}"
+          git add "$TARGET_BASE_DIR"
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit. The downloaded artifact matches the version already in GIT."
+          else
+            git commit -m "${{ inputs.commit-message }}"
+            git push origin HEAD:${{ inputs.git-branch }}
+          fi
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          echo "### Import Single Artifact Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifact ID:** \`${{ inputs.artifact-id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Package ID:** \`${{ inputs.package-id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Env:** \`${{ inputs.source-env }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Branch:** \`${{ inputs.git-branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Directory:** \`${{ inputs.git-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Successfully surgically extracted the artifact and committed it to Git!" >> $GITHUB_STEP_SUMMARY

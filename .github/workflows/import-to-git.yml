@@ -1,0 +1,270 @@
+name: '[DEV] Import CPI Package to GIT'
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-env:
+        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
+        required: true
+        type: string
+      git-branch:
+        description: 'Target branch in GIT to import into'
+        required: true
+        type: string
+      git-directory:
+        description: 'Target directory in GIT for the package'
+        required: true
+        type: string
+      package-id:
+        description: 'Package ID to download from BTP'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for GIT'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      source-env:
+        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
+        required: true
+        type: string
+      git-branch:
+        description: 'Target branch in GIT to import into'
+        required: true
+        type: string
+      git-directory:
+        description: 'Target directory in GIT for the package'
+        required: true
+        type: string
+      package-id:
+        description: 'Package ID to download from BTP'
+        required: true
+        type: string
+      commit-message:
+        description: 'Commit message for GIT'
+        required: true
+        type: string
+
+
+permissions:
+  contents: write
+
+jobs:
+  import-package:
+    name: Download package and commit
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.source-env }}
+    steps:
+      - name: Checkout repository at target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git-branch }}
+
+      - name: Create temporary download directory structure
+        run: |
+          mkdir -p btp-insuite/IntegrationPackages
+
+      - name: Request OAuth Token for BTP API
+        id: get-token
+        uses: ./.github/actions/get-token
+        with:
+          btp-api-user: ${{ vars.BTP_API_USER }}
+          btp-token-url: ${{ vars.BTP_TOKEN_URL }}
+          BTP_API_PASSWORD: ${{ secrets.BTP_API_PASSWORD }}
+
+      - name: Download Package from BTP
+        uses: ./.github/actions/download-package
+        with:
+          bearer-token: ${{ steps.get-token.outputs.token }}
+          package-id: ${{ inputs.package-id }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
+
+      - name: Move downloaded package to specified target directory
+        run: |
+          # SAP actions extract zip into btp-insuite/IntegrationPackages/<package-name>
+          TARGET_DIR="${{ inputs.git-directory }}"
+          
+          # The SAP download action creates btp-insuite/IntegrationPackages/<PackageFolder>/
+          PACKAGE_FOLDER=$(ls btp-insuite/IntegrationPackages)
+          if [ -n "$PACKAGE_FOLDER" ]; then
+            # Preserve old configuration file (which contains DEV/TST/PRD environment values) by merging it into the new one!
+            OLD_CONFIG="$TARGET_DIR/Configuration/ConfigParams_INTEGRATION_FLOW.json"
+            NEW_CONFIG="btp-insuite/IntegrationPackages/$PACKAGE_FOLDER/Configuration/ConfigParams_INTEGRATION_FLOW.json"
+            
+            if [ -f "$OLD_CONFIG" ] && [ -f "$NEW_CONFIG" ]; then
+               echo "Found existing ConfigParams_INTEGRATION_FLOW.json in Git. Merging to preserve environment values..."
+               jq -s '
+                 def merge_parameter_values(old_values; new_values):
+                   new_values + (old_values | to_entries | map(select(.key != "Default")) | from_entries);
+                 .[0] as $old | .[1] as $new |
+                 $new |
+                 .PackageIntegrationFlowParameters.Artifacts |= map(
+                   . as $new_artifact |
+                   ($old.PackageIntegrationFlowParameters.Artifacts | map(select(.ArtifactID == $new_artifact.ArtifactID)) | first) as $old_artifact |
+                   if $old_artifact then
+                     $new_artifact | .Parameters |= map(
+                       . as $new_param |
+                       ($old_artifact.Parameters | map(select(.ParameterKey == $new_param.ParameterKey)) | first) as $old_param |
+                       if $old_param and ($old_param | has("ParameterValues")) and ($new_param | has("ParameterValues")) then
+                         $new_param | .ParameterValues = merge_parameter_values($old_param.ParameterValues; $new_param.ParameterValues)
+                       else
+                         $new_param
+                       end
+                     )
+                   else
+                     $new_artifact
+                   end
+                 )
+               ' "$OLD_CONFIG" "$NEW_CONFIG" > temp_merged.json
+               
+               if [ $? -eq 0 ] && [ -s temp_merged.json ] && jq empty temp_merged.json 2>/dev/null; then
+                  mv temp_merged.json "$NEW_CONFIG"
+                  echo "✅ Successfully merged environment parameters from Git into new downloaded configuration."
+               else
+                  echo "⚠️ Warning: Failed to merge configuration parameters. Proceeding with raw download."
+                  rm -f temp_merged.json
+               fi
+            fi
+            
+            # Completely clean target directory so that artifacts deleted in CPI are also removed in Git
+            rm -rf "$TARGET_DIR"
+            mkdir -p "$TARGET_DIR"
+            
+            cp -a btp-insuite/IntegrationPackages/"$PACKAGE_FOLDER"/. "$TARGET_DIR/"
+            echo "✅ Successfully copied downloaded package contents to $TARGET_DIR"
+          else
+            echo "❌ No package contents found in btp-insuite/IntegrationPackages"
+            exit 1
+          fi
+          
+          # Clean up temporary directory
+          rm -rf btp-insuite
+
+      - name: Fetch Package Metadata
+        shell: bash
+        env:
+          BEARER_TOKEN: ${{ steps.get-token.outputs.token }}
+          BTP_API_URL: ${{ vars.BTP_API_URL }}
+        run: |
+          TARGET_DIR="${{ inputs.git-directory }}"
+          if [ ! -d "$TARGET_DIR" ]; then exit 0; fi
+          
+          PACKAGE_ID="${{ inputs.package-id }}"
+          
+          echo "Fetching metadata for Package $PACKAGE_ID..."
+          pkg_meta_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/IntegrationPackages('$PACKAGE_ID')" \
+            -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+          HTTP_STATUS=$(echo "$pkg_meta_resp" | tail -n1)
+          
+          if [ "$HTTP_STATUS" == "200" ]; then
+             echo "$pkg_meta_resp" | head -n -1 > "$TARGET_DIR/package-metadata.json"
+             echo "✅ Package metadata saved to $TARGET_DIR/package-metadata.json"
+          else
+             echo "⚠️ Could not fetch package metadata for $PACKAGE_ID. (HTTP $HTTP_STATUS)"
+          fi
+
+      - name: Fetch Metadata for all artifacts
+        shell: bash
+        env:
+          BEARER_TOKEN: ${{ steps.get-token.outputs.token }}
+          BTP_API_URL: ${{ vars.BTP_API_URL }}
+        run: |
+          TARGET_DIR="${{ inputs.git-directory }}"
+          if [ ! -d "$TARGET_DIR" ]; then exit 0; fi
+          
+          cd "$TARGET_DIR"
+          
+          for dir in *; do
+            if [ -d "$dir" ] && [ -f "$dir/META-INF/MANIFEST.MF" ]; then
+              ARTIFACT_ID=$(awk '/^Bundle-SymbolicName:/{flag=1; s=$0; next} flag && /^ /{s=s $0; next} flag{print s; exit}' "$dir/META-INF/MANIFEST.MF" | cut -d':' -f2 | cut -d';' -f1 | tr -d ' \r\n')
+              BUNDLE_TYPE=$(grep "^SAP-BundleType:" "$dir/META-INF/MANIFEST.MF" 2>/dev/null | cut -d':' -f2 | tr -d ' \r\n')
+              
+              if [ "$BUNDLE_TYPE" = "MessageMapping" ] || grep -q "MessageMapping" "$dir/META-INF/MANIFEST.MF" 2>/dev/null; then
+                 ENDPOINT="MessageMappingDesigntimeArtifacts"
+              elif [ "$BUNDLE_TYPE" = "ScriptCollection" ] || grep -q "scriptcollection" "$dir/META-INF/MANIFEST.MF" 2>/dev/null; then
+                 ENDPOINT="ScriptCollectionDesigntimeArtifacts"
+              elif [ "$BUNDLE_TYPE" = "ValueMapping" ] || grep -q "value_mapping" "$dir/META-INF/MANIFEST.MF" 2>/dev/null; then
+                 ENDPOINT="ValueMappingDesigntimeArtifacts"
+              else
+                 ENDPOINT="IntegrationDesigntimeArtifacts"
+              fi
+              
+              echo "Fetching metadata for $ARTIFACT_ID ($ENDPOINT)..."
+              meta_resp=$(curl -s -w "\n%{http_code}" -X GET "$BTP_API_URL/api/v1/$ENDPOINT(Id='$ARTIFACT_ID',Version='active')" \
+                -H "Authorization: $BEARER_TOKEN" -H "Accept: application/json")
+              HTTP_STATUS=$(echo "$meta_resp" | tail -n1)
+              
+              if [ "$HTTP_STATUS" == "200" ]; then
+                 echo "$meta_resp" | head -n -1 > "$dir/btp-metadata.json"
+                 echo "✅ Metadata saved for $ARTIFACT_ID"
+                 
+                 # Auto-generate metainfo.prop to preserve metadata for future package transports
+                 EXTRACTED_NAME=$(jq -r '.d.Name' "$dir/btp-metadata.json")
+                 EXTRACTED_DESC=$(jq -r '.d.Description' "$dir/btp-metadata.json")
+                 EXTRACTED_SENDER=$(jq -r '.d.Sender' "$dir/btp-metadata.json")
+                 EXTRACTED_RECEIVER=$(jq -r '.d.Receiver' "$dir/btp-metadata.json")
+                 
+                 echo "DEBUG: Name=$EXTRACTED_NAME, Sender=$EXTRACTED_SENDER, Receiver=$EXTRACTED_RECEIVER"
+                 
+                 # Map endpoint to Bundle Type string natively expected by SAP
+                 META_TYPE="IFlow"
+                 if [ "$ENDPOINT" = "MessageMappingDesigntimeArtifacts" ]; then META_TYPE="MessageMapping"; fi
+                 if [ "$ENDPOINT" = "ValueMappingDesigntimeArtifacts" ]; then META_TYPE="ValueMapping"; fi
+                 if [ "$ENDPOINT" = "ScriptCollectionDesigntimeArtifacts" ]; then META_TYPE="ScriptCollection"; fi
+                 
+                 echo "description=$EXTRACTED_DESC" > "$dir/metainfo.prop"
+                 if [ -n "$EXTRACTED_SENDER" ] && [ "$EXTRACTED_SENDER" != "null" ]; then echo "source=$EXTRACTED_SENDER" >> "$dir/metainfo.prop"; fi
+                 if [ -n "$EXTRACTED_RECEIVER" ] && [ "$EXTRACTED_RECEIVER" != "null" ]; then echo "target=$EXTRACTED_RECEIVER" >> "$dir/metainfo.prop"; fi
+                 echo "Type=$META_TYPE" >> "$dir/metainfo.prop"
+                 echo "name=$EXTRACTED_NAME" >> "$dir/metainfo.prop"
+                 echo "OriginBundleSymbolicName=$ARTIFACT_ID" >> "$dir/metainfo.prop"
+                 echo "✅ Auto-generated metainfo.prop for $ARTIFACT_ID"
+              else
+                 echo "⚠️ Could not fetch metadata for $ARTIFACT_ID"
+              fi
+              
+              echo "Renaming folder to Artifact Name for readability..."
+              BUNDLE_NAME=$(grep -iE '^Bundle-Name:' "$dir/META-INF/MANIFEST.MF" | cut -d':' -f2 | tr -d '\r\n' | sed -e 's/^[[:space:]]*//')
+              if [ -z "$BUNDLE_NAME" ] && [ -f "$dir/btp-metadata.json" ]; then
+                 BUNDLE_NAME=$(jq -r '.d.Name // .Name // empty' "$dir/btp-metadata.json")
+              fi
+              
+              if [ -n "$BUNDLE_NAME" ]; then
+                 SAFE_NAME=$(echo "$BUNDLE_NAME" | tr -d '/\\:*?"<>|')
+                 if [ "$SAFE_NAME" != "$dir" ]; then
+                    if [ ! -d "$SAFE_NAME" ]; then
+                       echo "Moving $dir -> $SAFE_NAME"
+                       mv "$dir" "$SAFE_NAME"
+                    else
+                       echo "Folder $SAFE_NAME already exists, skipping rename."
+                    fi
+                 fi
+              fi
+            fi
+          done
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git add "${{ inputs.git-directory }}"
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "${{ inputs.commit-message }}"
+            git push origin HEAD:${{ inputs.git-branch }}
+          fi
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          echo "### Import CPI Package to GIT Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Package ID:** \`${{ inputs.package-id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Env:** \`${{ inputs.source-env }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Branch:** \`${{ inputs.git-branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Directory:** \`${{ inputs.git-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Successfully pulled the package from Integration Suite and committed it to Git!" >> $GITHUB_STEP_SUMMARY
