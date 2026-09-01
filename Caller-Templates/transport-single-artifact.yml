@@ -39,7 +39,7 @@ on:
 
 jobs:
   call-engine:
-    uses: your-org/btp-is-cicd-engine/.github/workflows/transport-single-artifact.yml@main
+    uses: your-org/-btp-is-cicd-engine-/.github/workflows/transport-single-artifact.yml@main
     with:
       source-branch: ${{ inputs.source-branch }}
       target-branch: ${{ inputs.target-branch }}

@@ -17,7 +17,7 @@ If you simply download the workflow files and put them directly into your source
 ## Initial Setup & Environment Configuration
 
 ### Step 1: Fork the Engine
-Fork this repository into your GitHub organization (e.g., `your-org/btp-is-cicd-engine`).
+Fork this repository into your GitHub organization (e.g., `your-org/-btp-is-cicd-engine-`).
 
 ### Step 2: Create the Source Code Repository
 Create a new, empty repository in your organization (e.g., `your-org/cpi-source-code`). This is where the actual integration packages will be stored.
@@ -53,7 +53,7 @@ Since the engine and the source code are in separate repositories, you will run 
 1. In your **Source Code Repository**, create a folder named `.github/workflows/`.
 2. Go to the `Caller-Templates/` folder in this repository.
 3. Copy all the `.yml` files from `Caller-Templates/` and paste them into your Source Code repository's `.github/workflows/` folder.
-4. **Important**: Open each copied file and change `your-org/btp-is-cicd-engine` to match your actual organization and repository name where you forked the Engine.
+4. **Important**: Open each copied file and change `your-org/-btp-is-cicd-engine-` to match your actual organization and repository name where you forked the Engine.
 
 ### Running a Transport or Import
 That's it! Because of the way these templates are structured, you simply:

@@ -32,7 +32,7 @@ on:
 
 jobs:
   call-engine:
-    uses: your-org/btp-is-cicd-engine/.github/workflows/transport-and-deploy.yml@main
+    uses: your-org/-btp-is-cicd-engine-/.github/workflows/transport-and-deploy.yml@main
     with:
       source-branch: ${{ inputs.source-branch }}
       source-directory: ${{ inputs.source-directory }}

@@ -27,7 +27,7 @@ on:
 
 jobs:
   call-engine:
-    uses: your-org/btp-is-cicd-engine/.github/workflows/import-to-git.yml@main
+    uses: your-org/-btp-is-cicd-engine-/.github/workflows/import-to-git.yml@main
     with:
       source-env: ${{ inputs.source-env }}
       git-branch: ${{ inputs.git-branch }}

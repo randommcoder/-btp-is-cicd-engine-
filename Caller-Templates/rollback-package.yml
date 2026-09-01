@@ -29,7 +29,7 @@ on:
 
 jobs:
   call-engine:
-    uses: your-org/btp-is-cicd-engine/.github/workflows/rollback-package.yml@main
+    uses: your-org/-btp-is-cicd-engine-/.github/workflows/rollback-package.yml@main
     with:
       branch: ${{ inputs.branch }}
       package-directory: ${{ inputs.package-directory }}
