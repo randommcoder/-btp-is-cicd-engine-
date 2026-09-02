@@ -64,3 +64,25 @@ That's it! Because of the way these templates are structured, you simply:
 5. A nice UI form will pop up asking for the Environment, Package Name, Branch, etc. Fill in the boxes and hit Run!
 
 Your Source Code repository remains incredibly clean, containing only your integration artifacts and these lightweight UI templates. All the heavy lifting is completely managed by the Engine repository in the background.
+
+---
+
+## Managing Environment Parameters (Zero-Touch Transports)
+
+The engine automatically manages all environment-specific configurations (like endpoint URLs, proxy ports, and credentials) so you never have to manually update them after a transport.
+
+### The `Transport_Parameters.json` File
+To use this feature, create a file named `Transport_Parameters.json` in the root of your **Source Code Repository** on each of your environment branches (e.g., your QA branch and your PRD branch). This file acts as the configuration dictionary for that specific environment.
+
+Example format (for your QA branch):
+```json
+{
+    "SF_Endpoint_URL": "https://api.successfactors.eu/qa",
+    "Email_Receiver_Address": "qa-team@company.com"
+}
+```
+
+### How it Works
+When you trigger a transport (e.g., from DEV to QA), the engine checks out your target branch (QA) and reads its specific `Transport_Parameters.json` file. It dynamically scans your package for `parameters.prop` files and `ConfigParams_INTEGRATION_FLOW.json`. 
+
+It matches the Parameter Keys in your package against the keys in your JSON file and **automatically injects the correct values for the target environment** right before deploying to SAP Integration Suite!
