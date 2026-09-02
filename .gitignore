@@ -1,0 +1,35 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Node (just in case they ever add custom JS actions)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (just in case they ever add custom Py actions)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+
+# Sensitive
+.env
+*.pem
+*.key
