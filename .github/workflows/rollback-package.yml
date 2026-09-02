@@ -1,31 +1,6 @@
 name: '[EMERGENCY] Rollback Package in GIT'
 
 on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'The branch to perform the rollback on (e.g., DEV)'
-        required: true
-        type: string
-      package-directory:
-        description: 'The folder of the package to rollback (e.g., IntegrationPackages/SAP_Package)'
-        required: true
-        type: string
-      versions-to-rollback:
-        description: 'How many versions back to go (1 = undo last update)'
-        required: false
-        default: '1'
-        type: string
-      commit-message:
-        description: 'Commit message for the rollback'
-        required: false
-        default: 'Automated rollback of package'
-        type: string
-      target-env:
-        description: 'Optional: Target BTP Environment to push the rollback to (e.g., DEV, QA). Leave empty to only rollback in Git.'
-        required: false
-        type: string
-
   workflow_call:
     inputs:
       branch:

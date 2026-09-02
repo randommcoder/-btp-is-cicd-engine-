@@ -1,41 +1,6 @@
 name: '[ADMIN] Transport as Single Artifact'
 
 on:
-  workflow_dispatch:
-    inputs:
-      source-branch:
-        description: 'Source branch in GIT containing the package'
-        required: true
-        type: string
-      target-branch:
-        description: 'Target branch in GIT to transport code to (e.g., PRD)'
-        required: true
-        type: string
-      source-package-name:
-        description: 'Source Package Name (e.g. Example Package)'
-        required: true
-        type: string
-      target-package-name:
-        description: 'Target Package Name (e.g. Example Package)'
-        required: true
-        type: string
-      target-package-id:
-        description: 'Target Package ID (e.g. EXAMPLE_PACKAGE_ID)'
-        required: true
-        type: string
-      artifact-name:
-        description: 'Artifact Name / Folder Name (e.g. EXAMPLE ARTIFACT NAME)'
-        required: true
-        type: string
-      target-env:
-        description: 'Target Environment (e.g., QA, PRD)'
-        required: true
-        type: string
-      commit-message:
-        description: 'Commit message for the target branch'
-        required: true
-        type: string
-
   workflow_call:
     inputs:
       source-branch:

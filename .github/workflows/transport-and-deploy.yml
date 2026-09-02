@@ -1,34 +1,6 @@
 name: '[ADMIN] Transport and Deploy as Package'
 
 on:
-  workflow_dispatch:
-    inputs:
-      source-branch:
-        description: 'Source branch in GIT containing the package'
-        required: true
-        type: string
-      source-directory:
-        description: 'Source directory in GIT containing the package'
-        required: true
-        type: string
-      target-branch:
-        description: 'Target branch in GIT to transport code to (e.g., PRD)'
-        required: true
-        type: string
-      target-directory:
-        description: 'Target directory in GIT to place the package'
-        required: true
-        type: string
-      target-env:
-        description: 'Target Environment (e.g., QA, PRD)'
-        required: true
-        type: string
-
-      commit-message:
-        description: 'Commit message for the target branch'
-        required: true
-        type: string
-
   workflow_call:
     inputs:
       source-branch:

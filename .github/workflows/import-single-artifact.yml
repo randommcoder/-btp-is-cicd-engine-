@@ -1,33 +1,6 @@
 name: '[DEV] Import Single Artifact to GIT'
 
 on:
-  workflow_dispatch:
-    inputs:
-      source-env:
-        description: 'Source Environment (e.g., DEV-ENV, TEST-ENV, PROD-ENV)'
-        required: true
-        type: string
-      git-branch:
-        description: 'Target branch in GIT to import into'
-        required: true
-        type: string
-      git-directory:
-        description: 'Target directory in GIT for the package (e.g., IntegrationPackage)'
-        required: true
-        type: string
-      package-id:
-        description: 'Package ID to download from BTP (e.g., Example Package)'
-        required: true
-        type: string
-      artifact-id:
-        description: 'Artifact ID to download (e.g., EXAMPLE_ARTIFACT_ID)'
-        required: true
-        type: string
-      commit-message:
-        description: 'Commit message for GIT'
-        required: true
-        type: string
-
   workflow_call:
     inputs:
       source-env:
